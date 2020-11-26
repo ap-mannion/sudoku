@@ -11,10 +11,6 @@ from math import floor, ceil
 from random import sample
 from c2linkedlist import CDLList
 # TODO:
-#   - PuzzleGrid._getBoxNum()
-#   - Constraint matrix & solver fns: REDO so that ALL column nodes contain row ids in their
-# value fields and vice versa (except for when getBoxNum might be needed to get between box-number
-# constraints and row identifiers), the test script is already kinda done like this
 #   - hole poking algos: fully balanced, random, symmetric
 
 
@@ -168,42 +164,43 @@ class PuzzleGrid(np.ndarray):
 
         return hmin, hmax
 
-    def solve(self):
+    def solve(self, current_solution=[]):
         """
         Use the DLX algorithm to solve the puzzle as an exact cover problem
         """
         if not self.holesPoked():
-            raise RuntimeError("Puzzle already filled!")
+            raise RuntimeError("Puzzle is filled!")
+        if hasattr(self, "solution_coord_list"):
+            raise RuntimeError("Puzzle already solved!")
         if not hasattr(self, "dlx_repr"):
             self._generateAlgoXConstraintMatrix()
 
-        def getMinColSum(cols, cap, exclude=[]):
+        def getMinColSum(cap=None, exclude=[]):
+            cols = self.dlx_repr["C"]
             if len(cols) == len(exclude):
                 # this should only happen when the grid has been solved
                 return 0
-            min_colsum = cap
+            min_colsum = cap if cap is not None else len(self.dlx_repr["R"])
             for c, ll in cols.items():
                 if c not in exclude:
                     if ll.top.colsum < min_colsum:
                         min_colsum = ll.top.colsum
             return min_colsum
 
-        def getColIndexFromRowNode(row_node, row_idx):
-            if row_node.val == "rc":
+        def getColIndexFromRow(node, row_idx):
+            if node.val == "rc":
                 idx1, idx2 = row_idx[:2]
-            elif row_node.val == "rn":
+            elif node.val == "rn":
                 idx1, idx2 = row_idx[0], row_idx[2]
-            elif row_node.val == "cn":
+            elif node.val == "cn":
                 idx1, idx2 = row_idx[1:]
-            elif row_node.val == "bn":
+            elif node.val == "bn":
                 idx1 = self.getBoxNum(*row_idx[:2])
                 idx2 = row_idx[2]
-
-            return row_node.val, idx1, idx2
-
-        solved = False # recursion breaker
+            return node.val, idx1, idx2
 
         # get all columns with the min. number of non-zero rows
+        min_colsum = getMinColSum()
         min_cols = []
         for ll in self.dlx_repr["C"].values():
             if ll.top.colsum == min_colsum:
@@ -214,22 +211,85 @@ class PuzzleGrid(np.ndarray):
             selected_col = min_cols.pop(0) 
             solution_col_node = selected_col.top.next
             while solution_col_node.val != selected_col.top.val:
-                solution_row_idx = (*(selected_col.top.val[1:]), solution_col_node.val)
+                # this is where a solution branch (row label to add to the partial solution) is selected
+                # if it doesn't work out we backtrack and iterate on to the next row
+                solution_row_idx = solution_col_node.val
                 removal_row_indices = []
                 row = self.dlx_repr["R"][solution_row_idx]
                 row_node = row.top
 
                 # select all non-zero columnas in that row and all non-zero rows in each of those columns
-                # OK NOPE!!!!! THIS INDEXING IS TOO AWKWARD
-                # full_removal_col_indices = [getColIndexFromRowNode(row_node, solution_row_idx)]
-                # row_node = row_node.next
-                # while row_node.val != row.top.val:
-                #     full_removal_col_indices.append()
+                full_removal_col_indices = [getColIndexFromRow(row_node, solution_row_idx)]
+                row_node = row_node.next
+                while row_node.val != row.top.val:
+                    # iterate through the row nodes to get its non-zero columns
+                    rem_col_idx = getColIndexFromRow(row_node, solution_row_idx)
+                    full_removal_col_indices.append(rem_col_idx)
+                    rem_col = dlx_repr["C"][rem_col_idx]
+                    rem_col_node = rem_col.top.next
+                    while rem_col_node.val != rem_col.top.val:
+                        # iterate through each selected column to remove non-zero rows
+                        if rem_col_node.val not in removal_row_indices:
+                            removal_row_indices.append(rem_col_node.val)
+                        rem_col_node = rem_col_node.next
+                    row_node = row_node.next
 
-                solution_col_node = solution_col_node.next
+                # remove all the values in these rows from all columns
+                backtrack_dict = {}
+                for col_idx, col_ll in dlx_repr["C"].items():
+                    backtrack_dict[col_idx] = []
+                    for row_idx in removal_row_indices:
+                        try:
+                            if col_idx not in full_removal_col_indices:
+                                partial_removal_col_node = col_ll.getNodeByVal(row_idx)
+                                bktr_val = (row_idx, partial_removal_col_node.next.val)
+                            else:
+                                bktr_val = row_idx
+                            col_ll.remove(row_idx)
+                            backtrack_dict[col_idx].append(bktr_val)
+                        except ValueError:
+                            continue
+                
+                min_colsum = getMinColSum(exclude=full_removal_col_indices)
+                if min_colsum == 0:
+                    if sum([ll.top.colsum for ll in self.dlx_repr["C"].values()]) > 0:
+                        # backtracking...
+                        for col_idx, bktr_vals in backtrack_dict.items():
+                            # the next-node memory backtracking for columns that aren't
+                            # being totally removed needs the backtrack to iterate backwards
+                            # through the memory while the columns being completely deleted
+                            # need to iterate forwards :)
+                            if type(bktr_vals[0]) is tuple:
+                                for t in reversed(bktr_vals):
+                                    self.dlx_repr["C"][col_idx].insert(*t, before=True)
+                            else:
+                                for row_idx in bktr_vals:
+                                    self.dlx_repr["C"][col_idx].insert(row_idx)
+                        solution_col_node = solution_col_node.next
+                    else:
+                        # Finishing point
+                        current_solution.append(solution_row_idx)
+                        self.solution_coord_list = current_solution
+                        return True
+                else:
+                    current_solution.append(solution_row_idx)
+                    self.dlx_repr["R"] = {
+                        k:v for k, v in self.dlx_repr["R"].items() if k not in removal_row_indices
+                    }
+                    self.dlx_repr["C"] = {
+                        k:v for k, v in self.dlx_repr["C"].items() if k not in full_removal_col_indices
+                    }
+                    solved = self.solve(current_solution)
+                    if solved:
+                        break
+                if solved:
+                    break
 
     def _getBoxNum(r, c):
-        pass
+        """
+        Returns an int in [0,d-1] - boxes numbered L to R along rows 
+        """
+        return (self.m-1)*floor(r/self.m)+floor(c/self.n) 
 
     def _generateAlgoXConstraintMatrix(self):
         """
@@ -257,6 +317,7 @@ class PuzzleGrid(np.ndarray):
                 br_key += 1
 
         symbols = np.arange(self.d)+1
+        # fill value fields for the column LLs: each node value will be a row index (key value)
         for c, ll in dlx_cols.items():
             header_cc = c[0]
             prev_node = ll.top
@@ -264,27 +325,27 @@ class PuzzleGrid(np.ndarray):
                 i, j = c[1], c[2]
                 if self[i,j] == 0:
                     for s in symbols:
-                        ll.insert(s, prev_node.val)
+                        ll.insert((i, j, s), prev_node.val)
                         prev_node = prev_node.next
                 else:
-                    ll.insert(self[i,j], prev_node.val)
+                    ll.insert((i, j, self[i,j]), prev_node.val)
             elif header_cc == "rn":
                 i, s = c[1], c[2]
                 if s in self[i,:]:
                     j, = np.where(self[i,:] == s)
-                    ll.insert(j.item(), prev_node.val)
+                    ll.insert((i, j.item(), s), prev_node.val)
                 else:
                     for j in range(self.d):
-                        ll.insert(j, prev_node.val)
+                        ll.insert((i, j, s), prev_node.val)
                         prev_node = prev_node.next
             elif header_cc == "cn":
                 j, s = c[1], c[2]
                 if s in self[:,j]:
                     i, = np.where(self[:,j] == s)
-                    ll.insert(i.item(), prev_node.val)
+                    ll.insert((i.item(), j, s), prev_node.val)
                 else:
                     for i in range(self.d):
-                        ll.insert(i, prev_node.val)
+                        ll.insert((i, j, s), prev_node.val)
                         prev_node = prev_node.next
             elif header_cc == "bn":
                 b, s = c[1], c[2]
@@ -292,10 +353,10 @@ class PuzzleGrid(np.ndarray):
                     s_idx = np.where(self == s)
                     coord_set = set([(k,l) for k, l in zip(*s_idx)])
                     i, j = s_coords.intersection(set(box_ref["coords"][b])).pop()
-                    ll.insert((i, j), prev_node.val)
+                    ll.insert((i, j, s), prev_node.val)
                 else:
                     for i, j in box_ref["coords"][b]:
-                        ll.insert((i, j), prev_node.val)
+                        ll.insert((i, j, s), prev_node.val)
                         prev_node = prev_node.next
 
         # Row LLs: the dictionary keys will be again a unique identifier, while the node values
