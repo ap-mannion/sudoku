@@ -317,7 +317,7 @@ class PuzzleGrid(np.ndarray):
                 br_key += 1
 
         symbols = np.arange(self.d)+1
-        # fill value fields for the column LLs: each node value will be a row index (key value)
+        # fill value fields for the column LLs: each node value will be a row index (key)
         for c, ll in dlx_cols.items():
             header_cc = c[0]
             prev_node = ll.top
@@ -352,7 +352,7 @@ class PuzzleGrid(np.ndarray):
                 if s in box_ref["vals"][b]:
                     s_idx = np.where(self == s)
                     coord_set = set([(k,l) for k, l in zip(*s_idx)])
-                    i, j = s_coords.intersection(set(box_ref["coords"][b])).pop()
+                    i, j = coord_set.intersection(set(box_ref["coords"][b])).pop()
                     ll.insert((i, j, s), prev_node.val)
                 else:
                     for i, j in box_ref["coords"][b]:
@@ -361,7 +361,7 @@ class PuzzleGrid(np.ndarray):
 
         # Row LLs: the dictionary keys will be again a unique identifier, while the node values
         # will just contain the constraint type
-        def _makeRowLL():
+        def makeRowLL():
             ll = CDLList(constraint_codes[0])
             prev_node = constraint_codes[0]
             for cc in constraint_codes[1:]:
@@ -373,11 +373,11 @@ class PuzzleGrid(np.ndarray):
             for c in range(self.d):
                 if self[r,c] != 0:
                     row_idx = (r, c, self[r,c])
-                    dlx_rows[row_idx] = _makeRowLL()
+                    dlx_rows[row_idx] = makeRowLL()
                 else:
                     for s in symbols:
                         row_idx = (r, c, s)
-                        dlx_rows[row_idx] = _makeRowLL()
+                        dlx_rows[row_idx] = makeRowLL()
 
         self.dlx_repr = {"R":dlx_rows, "C":dlx_cols}
 
@@ -539,7 +539,7 @@ class SudokuGenerator:
         h_indic = np.zeros((d,d))
         h_indic[np.where(sum((pattern_ref_sdk == k+1) for k in range(q)))] = 1
         if n_holes%d != 0:
-            # select a random subset of n_holes mod d cells from another single-symbol pattern in the
+            # select a random subset of (n_holes mod d) cells from another single-symbol pattern in the
             # reference grid to poke the remainder holes - in this case each box will have a singly-
             # balanced pattern, but (n_holes mod d) of them will have q+1 holes while the rest have q
             remdr_ref_pattern = np.where(pattern_ref_sdk == q+1)
@@ -549,21 +549,34 @@ class SudokuGenerator:
                 h_indic[r,c] = 1
 
         # scramble using 4-cycles but make sure each is contained within a box
-        box_xygen = lambda: np.random.choice(((i,j) for i in range(m) for j in range(n)))
-        step = 0
+        box_xygen = lambda r=0: (np.random.choice(m-r), np.random.choice(n-r))
+        step, change = 0, 0
+        print(f"\nDBHP 4-cycling: max. {n_steps} steps...")
+
+        def choose_higher_coord(fi, b):
+            try:
+                ret = np.random.choice([a for a in range(fi+1, b)])
+            except ValueError:
+                ret = fi+1
+            return ret
+
         while step < n_steps:
-            bx, by = box_xygen()
-            i, j = box_xygen()
-            k, l = map(lambda fi, b: np.random.choice([n for n in range(fi, b)]), (i, j), (m, n))
+            bx, by = box_xygen() # box coordinates on mxn grid
+            i, j = box_xygen(1) # internal box coordinates: can't have i==m or j==n
+            k, l = map(choose_higher_coord, (i, j), (m, n))
+            i += bx*m; j += by*n
+            k += bx*m; l += by*n
             if (h_indic[i,j]+h_indic[k,l] == 2) & (h_indic[i,l]+h_indic[k,j] == 0):
                 h_indic[i,j] -= 1; h_indic[k,l] -= 1
                 h_indic[i,l] += 1; h_indic[k,j] += 1
-                step += 1
+                change += 1
+            step += 1
+        print(f"{change} 4-cycle changes made")
 
         self.out_puzzle[np.where(h_indic == 1)] = 0            
 
 
-# TESTING
+# GENERATION TESTING
 if __name__ == "__main__":
     from argparse import ArgumentParser
     from subprocess import check_output
