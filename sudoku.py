@@ -11,6 +11,15 @@ from math import floor, ceil
 from random import sample
 from c2linkedlist import CDLList
 # TODO:
+#   - solvability checking for hole poking: hole pokes will have to be heavily refactored - make a copy of the
+# grid that will have to be updated along with the indicator matrix to make sure there's a unique solution at
+# each step, although it should be possible not to have to do the ENTIRE hole poking one-by-one with a call to
+# solve() at every update
+#       steps;
+#       - insert check condition in solve() to break recursion & signal when the puzzle doesn't have a unique
+# solution
+#       - function PuzzleGrid.hasBeenSolved() to check whether `dlx_repr` corresponds to a filled grid
+#   - method to convert a unique `dlx_repr` back to a grid
 #   - hole poking algos: fully balanced, random, symmetric
 
 
@@ -21,10 +30,9 @@ class PuzzleGrid(np.ndarray):
     are called within SudokuGenerator member functions.
     """
 
-    def __new__(cls, shape, m):
-        assert(len(shape) == 2)
-        assert(shape[0] == shape[1])
-        puzzlegrid = super().__new__(cls, shape, dtype=np.int16)
+    def __new__(cls, d, m):
+        assert(d%m == 0)
+        puzzlegrid = super().__new__(cls, (d,d), dtype=np.int16)
         puzzlegrid.m = m
 
         return puzzlegrid
@@ -218,7 +226,7 @@ class PuzzleGrid(np.ndarray):
                 row = self.dlx_repr["R"][solution_row_idx]
                 row_node = row.top
 
-                # select all non-zero columnas in that row and all non-zero rows in each of those columns
+                # select all non-zero columns in that row and all non-zero rows in each of those columns
                 full_removal_col_indices = [getColIndexFromRow(row_node, solution_row_idx)]
                 row_node = row_node.next
                 while row_node.val != row.top.val:
@@ -437,7 +445,7 @@ class SudokuGenerator:
 
     def __init__(self, m=3, n=3, max_gen_cycles=10):
         self.max_gen_cycles = max_gen_cycles
-        self.base_puzzle = PuzzleGrid(shape=(m*n, m*n), m=m)
+        self.base_puzzle = PuzzleGrid(d=m*n, m=m)
         self.puzzle_list = [self.base_puzzle]
         self.max_shuffles_before_restart = int(2*(m*n)*1e3/3)
 
@@ -535,7 +543,7 @@ class SudokuGenerator:
         q = floor(n_holes/d)
 
         # use a canonical sudoku grid to initialise a doubly-balanced pattern
-        pattern_ref_sdk = PuzzleGrid((d,d), m)
+        pattern_ref_sdk = PuzzleGrid(d, m)
         h_indic = np.zeros((d,d))
         h_indic[np.where(sum((pattern_ref_sdk == k+1) for k in range(q)))] = 1
         if n_holes%d != 0:
