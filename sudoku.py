@@ -21,6 +21,7 @@ from c2linkedlist import CDLList
 #       - function PuzzleGrid.hasBeenSolved() to check whether `dlx_repr` corresponds to a filled grid
 #   - method to convert a unique `dlx_repr` back to a grid
 #   - hole poking algos: fully balanced, random, symmetric
+#   - refactor LSTraversal internals
 
 
 class PuzzleGrid(np.ndarray):
@@ -207,6 +208,15 @@ class PuzzleGrid(np.ndarray):
                 idx2 = row_idx[2]
             return node.val, idx1, idx2
 
+        def selectRemovalRowsInCol(rem_col_idx, removal_row_idx_list):
+            rem_col = self.dlx_repr["C"][rem_col_idx]
+            rem_col_node = rem_col.top.next
+            while rem_col_node.val != rem_col.top.val:
+                # iterate through each selected column to remove non-zero rows
+                if rem_col_node.val not in removal_row_idx_list:
+                    removal_row_idx_list.append(rem_col_node.val)
+                rem_col_node = rem_col_node.next
+
         # get all columns with the min. number of non-zero rows
         min_colsum = getMinColSum()
         min_cols = []
@@ -222,33 +232,29 @@ class PuzzleGrid(np.ndarray):
                 # this is where a solution branch (row label to add to the partial solution) is selected
                 # if it doesn't work out we backtrack and iterate on to the next row
                 solution_row_idx = solution_col_node.val
-                removal_row_indices = []
+                removal_row_idx_list = []
                 row = self.dlx_repr["R"][solution_row_idx]
                 row_node = row.top
 
                 # select all non-zero columns in that row and all non-zero rows in each of those columns
-                full_removal_col_indices = [getColIndexFromRow(row_node, solution_row_idx)]
+                rem_col_idx = getColIndexFromRow(row_node, solution_row_idx)
+                full_removal_col_idx_list = [rem_col_idx]
+                selectRemovalRowsInCol(rem_col_idx, removal_row_idx_list)
                 row_node = row_node.next
                 while row_node.val != row.top.val:
                     # iterate through the row nodes to get its non-zero columns
                     rem_col_idx = getColIndexFromRow(row_node, solution_row_idx)
-                    full_removal_col_indices.append(rem_col_idx)
-                    rem_col = dlx_repr["C"][rem_col_idx]
-                    rem_col_node = rem_col.top.next
-                    while rem_col_node.val != rem_col.top.val:
-                        # iterate through each selected column to remove non-zero rows
-                        if rem_col_node.val not in removal_row_indices:
-                            removal_row_indices.append(rem_col_node.val)
-                        rem_col_node = rem_col_node.next
+                    full_removal_col_idx_list.append(rem_col_idx)
+                    selectRemovalRowsInCol(rem_col_idx, removal_row_idx_list)
                     row_node = row_node.next
 
                 # remove all the values in these rows from all columns
                 backtrack_dict = {}
-                for col_idx, col_ll in dlx_repr["C"].items():
+                for col_idx, col_ll in self.dlx_repr["C"].items():
                     backtrack_dict[col_idx] = []
-                    for row_idx in removal_row_indices:
+                    for row_idx in removal_row_idx_list:
                         try:
-                            if col_idx not in full_removal_col_indices:
+                            if col_idx not in full_removal_col_idx_list:
                                 partial_removal_col_node = col_ll.getNodeByVal(row_idx)
                                 bktr_val = (row_idx, partial_removal_col_node.next.val)
                             else:
@@ -258,7 +264,7 @@ class PuzzleGrid(np.ndarray):
                         except ValueError:
                             continue
                 
-                min_colsum = getMinColSum(exclude=full_removal_col_indices)
+                min_colsum = getMinColSum(exclude=full_removal_col_idx_list)
                 if min_colsum == 0:
                     if sum([ll.top.colsum for ll in self.dlx_repr["C"].values()]) > 0:
                         # backtracking...
@@ -282,10 +288,10 @@ class PuzzleGrid(np.ndarray):
                 else:
                     current_solution.append(solution_row_idx)
                     self.dlx_repr["R"] = {
-                        k:v for k, v in self.dlx_repr["R"].items() if k not in removal_row_indices
+                        k:v for k, v in self.dlx_repr["R"].items() if k not in removal_row_idx_list
                     }
                     self.dlx_repr["C"] = {
-                        k:v for k, v in self.dlx_repr["C"].items() if k not in full_removal_col_indices
+                        k:v for k, v in self.dlx_repr["C"].items() if k not in full_removal_col_idx_list
                     }
                     solved = self.solve(current_solution)
                     if solved:
@@ -389,6 +395,14 @@ class PuzzleGrid(np.ndarray):
 
         self.dlx_repr = {"R":dlx_rows, "C":dlx_cols}
 
+    def _solutionCoordListToGrid(self):
+        if not hasattr(self, "solution_coord_list"):
+            raise RuntimeError("Puzzle hasn't yet been solved")
+
+        for r, c, s in self.solution_coord_list:
+            if self[r,c] == 0:
+                self[r,c] = s
+
     def _chooseLSTparams(self):
         v_row_indices, v_symbols = [], []
         for i in range(self.m):
@@ -431,7 +445,7 @@ class PuzzleGrid(np.ndarray):
                 self[r2,swap_index] = tmp
                 new_swap_indices, = np.where(self[r1,:] == self[r1,swap_index])
 
-    def _getDuplicateIndices(self, r):       
+    def _getDuplicateIndices(self, r):
         symbols, counts = np.unique(self[r,:], return_counts=True)
         duplicate_indices, = np.where(self[r,:] == symbols[counts != 1].item())  
 
@@ -483,7 +497,7 @@ class SudokuGenerator:
             self.log['times'].append(t)
             self.log['travs'].append(loop)
             
-    def singlyBalancedHolePattern(self, diff, n_steps=50):
+    def singlyBalancedHP(self, diff, n_steps=50):
         """
         Implements the hole pattern algorithm described in section 4.1 of Ansotegui et al 2011
         """
@@ -530,7 +544,7 @@ class SudokuGenerator:
 
         self.out_puzzle[np.where(h_indic == 1)] = 0
 
-    def doublyBalancedHolePattern(self, diff, n_steps=50):
+    def doublyBalancedHP(self, diff, n_steps=50):
         """
         Implements the hole pattern algorithm described in section 4.2 of Ansotegui et al 2011
         """
