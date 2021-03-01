@@ -10,6 +10,7 @@ import numpy as np
 from math import floor, ceil
 from random import sample
 from c2linkedlist import CDLList
+from collections import defaultdict
 # TODO:
 #   - solvability checking for hole poking: hole pokes will have to be heavily refactored - make a copy of the
 # grid that will have to be updated along with the indicator matrix to make sure there's a unique solution at
@@ -44,7 +45,8 @@ class PuzzleGrid(np.ndarray):
         n = int(d/self.m)
         symbols = np.arange(d, dtype=np.int16)+1
         np.random.shuffle(symbols)
-        onecycle = lambda arr: np.concatenate((arr[1:], arr[:1]))
+        def onecycle(arr):
+            return np.concatenate((arr[1:], arr[:1]))
         prm_index = self.m*(n-1)
         grid = np.copy(symbols)
         for i in range(self.m):
@@ -179,9 +181,7 @@ class PuzzleGrid(np.ndarray):
         """
         if not self.holesPoked():
             raise RuntimeError("Puzzle is filled!")
-        if hasattr(self, "solution_coord_list"):
-            raise RuntimeError("Puzzle already solved!")
-        if not hasattr(self, "dlx_repr"):
+        if not self._isConstraintMatrixValid():
             self._generateAlgoXConstraintMatrix()
 
         def getMinColSum(cap=None, exclude=[]):
@@ -299,6 +299,9 @@ class PuzzleGrid(np.ndarray):
                 if solved:
                     break
 
+    def solve_unique(self):
+        pass
+
     def _getBoxNum(r, c):
         """
         Returns an int in [0,d-1] - boxes numbered L to R along rows 
@@ -395,13 +398,34 @@ class PuzzleGrid(np.ndarray):
 
         self.dlx_repr = {"R":dlx_rows, "C":dlx_cols}
 
-    def _solutionCoordListToGrid(self):
-        if not hasattr(self, "solution_coord_list"):
-            raise RuntimeError("Puzzle hasn't yet been solved")
+    def _isConstraintMatrixValid(self):
+        if not hasattr(self, dlx_repr):
+            return False
+        current_grid = np.copy(self)
+        coords_checked = defaultdict(int)
+        for r,c,s in self.dlx_repr["R"].keys():
+            if self[r,c] != 0:
+                # if there's more than one row constraint for this non-empty tile
+                # OR if the value is not the same
+                if (r,c) in coords_checked or s != self[r,c]: 
+                    return False
+            coords_checked[(r,c)] += 1
+        
+        # check that there are no tiles listed as empty by the grid but full
+        # by the constraint matrix
+        for (r,c), n in coords_checked.items():
+            if self[r,c] == 0 and n == 1:
+                return False
+                
+        return True
+        
+    # def _solutionCoordListToGrid(self):
+    #     if not hasattr(self, "solution_coord_list"):
+    #         raise RuntimeError("Puzzle hasn't yet been solved")
 
-        for r, c, s in self.solution_coord_list:
-            if self[r,c] == 0:
-                self[r,c] = s
+    #     for r, c, s in self.solution_coord_list:
+    #         if self[r,c] == 0:
+    #             self[r,c] = s
 
     def _chooseLSTparams(self):
         v_row_indices, v_symbols = [], []
@@ -463,7 +487,7 @@ class SudokuGenerator:
         self.puzzle_list = [self.base_puzzle]
         self.max_shuffles_before_restart = int(2*(m*n)*1e3/3)
 
-    def generate(self, log_mode=False):
+    def generateFilledGrid(self, log_mode=False):
         if log_mode:
             from sys import stdout
             from time import time
@@ -496,106 +520,111 @@ class SudokuGenerator:
                 self.log = {'times':[], 'travs':[]}
             self.log['times'].append(t)
             self.log['travs'].append(loop)
-            
-    def singlyBalancedHP(self, diff, n_steps=50):
-        """
-        Implements the hole pattern algorithm described in section 4.1 of Ansotegui et al 2011
-        """
+
+    def makeHoles(self, mask_fn, diff, **mask_params):
         if self.out_puzzle.holesPoked():
             raise RuntimeWarning("Attempted to apply hole pattern algorithm to puzzle that's already prepared")
             return
-        hrange = self.out_puzzle.nHolesByDiff(diff)
-        n_holes = np.random.choice([i for i in range(*hrange)])
-        d = self.out_puzzle.d
-        q = floor(n_holes/d)
+        mask = mask_fn(self.out_puzzle, diff, **mask_params)
+        for i, (x,y) in enumerate(zip(*np.where(mask == 0))):
+            self.out_puzzle[x,y] = 0
+        
 
-        # canonical singly-balanced indicator matrix
-        first_row = np.concatenate((np.ones(q), np.zeros(d-q)))
-        h_indic = np.copy(first_row)
-        permute = lambda arr, i: np.concatenate((arr[i:], arr[:i]))
-        for i in range(d-1):
-            h_indic = np.vstack((h_indic, permute(first_row, i+1)))
 
-        # scramble it using 4-cycles
-        step = 0
-        while step < n_steps:
-            i, j = (np.random.choice(d) for _ in range(2))
-            k, l = map(lambda fi: np.random.choice([n for n in range(fi, d)]), (i, j))
-            if (h_indic[i,j]+h_indic[k,l] == 2) & (h_indic[i,l]+h_indic[k,j] == 0):
-                h_indic[i,j] -= 1; h_indic[k,l] -= 1
-                h_indic[i,l] += 1; h_indic[k,j] += 1
-                step += 1
+def singlyBalancedMask(puzzle, diff, n_steps=50):
+    """
+    Implements the hole pattern algorithm described in section 4.1 of Ansotegui et al 2011
+    """
+    hrange = puzzle.nHolesByDiff(diff)
+    n_holes = np.random.choice([i for i in range(*hrange)])
+    d = puzzle.d
+    q = floor(n_holes/d)
 
-        if n_holes%d != 0:
-            # if the dimension of the puzzle doesn't divide the number of holes chosen,
-            # we randomly select another n_holes mod d cells with no rows or columns in
-            # common in which to put holes
-            filled_coords = np.where(h_indic == 0)
-            candidate_remdr_coords, rows_tracker, cols_tracker = [], [], []
-            for i, j in zip(*filled_coords):
-                if (i in rows_tracker) | (j in cols_tracker):
-                    continue
-                rows_tracker.append(i)
-                cols_tracker.append(j)
-                candidate_remdr_coords.append((i,j))
-            remdr_coords = sample(candidate_remdr_coords, n_holes%d)
-            for r, c in remdr_coords:
-                h_indic[r,c] = 1
+    # canonical singly-balanced indicator matrix
+    first_row = np.concatenate((np.ones(q), np.zeros(d-q)))
+    mask = np.copy(first_row)
+    permute = lambda arr, i: np.concatenate((arr[i:], arr[:i]))
+    for i in range(d-1):
+        mask = np.vstack((mask, permute(first_row, i+1)))
 
-        self.out_puzzle[np.where(h_indic == 1)] = 0
-
-    def doublyBalancedHP(self, diff, n_steps=50):
-        """
-        Implements the hole pattern algorithm described in section 4.2 of Ansotegui et al 2011
-        """
-        if self.out_puzzle.holesPoked():
-            raise RuntimeWarning("Attempted to apply hole pattern algorithm to puzzle that's already prepared")
-            return
-        hrange = self.out_puzzle.nHolesByDiff(diff)
-        n_holes = np.random.choice([i for i in range(*hrange)])
-        d, m, n = self.out_puzzle.d, self.out_puzzle.m, self.out_puzzle.n
-        q = floor(n_holes/d)
-
-        # use a canonical sudoku grid to initialise a doubly-balanced pattern
-        pattern_ref_sdk = PuzzleGrid(d, m)
-        h_indic = np.zeros((d,d))
-        h_indic[np.where(sum((pattern_ref_sdk == k+1) for k in range(q)))] = 1
-        if n_holes%d != 0:
-            # select a random subset of (n_holes mod d) cells from another single-symbol pattern in the
-            # reference grid to poke the remainder holes - in this case each box will have a singly-
-            # balanced pattern, but (n_holes mod d) of them will have q+1 holes while the rest have q
-            remdr_ref_pattern = np.where(pattern_ref_sdk == q+1)
-            remdr_indices = np.random.choice(d, n_holes%d, replace=False)
-            remdr_rows, remdr_cols = map(lambda x: x[remdr_indices], remdr_ref_pattern)
-            for r, c in zip(remdr_rows, remdr_cols):
-                h_indic[r,c] = 1
-
-        # scramble using 4-cycles but make sure each is contained within a box
-        box_xygen = lambda r=0: (np.random.choice(m-r), np.random.choice(n-r))
-        step, change = 0, 0
-        print(f"\nDBHP 4-cycling: max. {n_steps} steps...")
-
-        def choose_higher_coord(fi, b):
-            try:
-                ret = np.random.choice([a for a in range(fi+1, b)])
-            except ValueError:
-                ret = fi+1
-            return ret
-
-        while step < n_steps:
-            bx, by = box_xygen() # box coordinates on mxn grid
-            i, j = box_xygen(1) # internal box coordinates: can't have i==m or j==n
-            k, l = map(choose_higher_coord, (i, j), (m, n))
-            i += bx*m; j += by*n
-            k += bx*m; l += by*n
-            if (h_indic[i,j]+h_indic[k,l] == 2) & (h_indic[i,l]+h_indic[k,j] == 0):
-                h_indic[i,j] -= 1; h_indic[k,l] -= 1
-                h_indic[i,l] += 1; h_indic[k,j] += 1
-                change += 1
+    # scramble it using 4-cycles
+    step = 0
+    while step < n_steps:
+        i, j = (np.random.choice(d) for _ in range(2))
+        k, l = map(lambda fi: np.random.choice([n for n in range(fi, d)]), (i, j))
+        if (mask[i,j]+mask[k,l] == 2) & (mask[i,l]+mask[k,j] == 0):
+            mask[i,j] -= 1; mask[k,l] -= 1
+            mask[i,l] += 1; mask[k,j] += 1
             step += 1
-        print(f"{change} 4-cycle changes made")
 
-        self.out_puzzle[np.where(h_indic == 1)] = 0            
+    if n_holes%d != 0:
+        # if the dimension of the puzzle doesn't divide the number of holes chosen,
+        # we randomly select another n_holes mod d cells with no rows or columns in
+        # common in which to put holes
+        filled_coords = np.where(mask == 0)
+        candidate_remdr_coords, rows_tracker, cols_tracker = [], [], []
+        for i, j in zip(*filled_coords):
+            if (i in rows_tracker) | (j in cols_tracker):
+                continue
+            rows_tracker.append(i)
+            cols_tracker.append(j)
+            candidate_remdr_coords.append((i,j))
+        remdr_coords = sample(candidate_remdr_coords, n_holes%d)
+        for r, c in remdr_coords:
+            mask[r,c] = 1
+
+    return mask
+
+
+def doublyBalancedMask(puzzle, diff, n_steps=50):
+    """
+    Implements the hole pattern algorithm described in section 4.2 of Ansotegui et al 2011
+    """
+    hrange = puzzle.nHolesByDiff(diff)
+    n_holes = np.random.choice([i for i in range(*hrange)])
+    d, m, n = puzzle.d, puzzle.m, puzzle.n
+    q = floor(n_holes/d)
+
+    # use a canonical sudoku grid to initialise a doubly-balanced pattern
+    pattern_ref_sdk = PuzzleGrid(d, m)
+    mask = np.zeros((d,d))
+    mask[np.where(sum((pattern_ref_sdk == k+1) for k in range(q)))] = 1
+    if n_holes%d != 0:
+        # select a random subset of (n_holes mod d) cells from another single-symbol pattern in the
+        # reference grid to poke the remainder holes - in this case each box will have a singly-
+        # balanced pattern, but (n_holes mod d) of them will have q+1 holes while the rest have q
+        remdr_ref_pattern = np.where(pattern_ref_sdk == q+1)
+        remdr_indices = np.random.choice(d, n_holes%d, replace=False)
+        remdr_rows, remdr_cols = map(lambda x: x[remdr_indices], remdr_ref_pattern)
+        for r, c in zip(remdr_rows, remdr_cols):
+            mask[r,c] = 1
+
+    # scramble using 4-cycles but make sure each is contained within a box
+    box_xygen = lambda r=0: (np.random.choice(m-r), np.random.choice(n-r))
+    step, change = 0, 0
+    print(f"\nDBHP 4-cycling: max. {n_steps} steps...")
+
+    def choose_higher_coord(fi, b):
+        try:
+            ret = np.random.choice([a for a in range(fi+1, b)])
+        except ValueError:
+            ret = fi+1
+        return ret
+
+    while step < n_steps:
+        bx, by = box_xygen() # box coordinates on mxn grid
+        i, j = box_xygen(1) # internal box coordinates: can't have i==m or j==n
+        k, l = map(choose_higher_coord, (i, j), (m, n))
+        i += bx*m; j += by*n
+        k += bx*m; l += by*n
+        if (mask[i,j]+mask[k,l] == 2) & (mask[i,l]+mask[k,j] == 0):
+            mask[i,j] -= 1; mask[k,l] -= 1
+            mask[i,l] += 1; mask[k,j] += 1
+            change += 1
+        step += 1
+    print(f"{change} 4-cycle changes made")
+
+    return mask            
 
 
 # GENERATION TESTING
